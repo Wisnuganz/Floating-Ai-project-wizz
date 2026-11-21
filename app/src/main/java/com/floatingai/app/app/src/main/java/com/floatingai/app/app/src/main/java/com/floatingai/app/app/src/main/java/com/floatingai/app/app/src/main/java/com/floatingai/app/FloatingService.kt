@@ -85,6 +85,9 @@ class FloatingService : Service() {
 
     internal val history = mutableListOf<GeminiClient.Msg>()
     internal var job: Job? = null
+    internal var liveActive = false
+internal var liveSession: ScreenGrab.Session? = null
+internal var liveJob: Job? = null
     internal var pending = 0
     internal var pendingPrompt = ""
     internal val recognizer by lazy { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) }
@@ -334,4 +337,91 @@ class FloatingService : Service() {
             .addOnSuccessListener { if (c.isActive) c.resume(it.text) }
             .addOnFailureListener { if (c.isActive) c.resume("") }
     }
+    
+internal fun toggleLive() {
+    if (liveActive) {
+        stopLive()
+    } else {
+        requestCapture(3)
+    }
+}
+
+internal fun stopLive() {
+    liveActive = false
+    liveJob?.cancel()
+    liveJob = null
+    liveSession?.close()
+    liveSession = null
+
+    try { promote(false) } catch (_: Exception) {}
+    toast("Live Screen dihentikan")
+}
+
+internal fun startLiveSession(code: Int, data: Intent) {
+    scope.launch {
+        try {
+            promote(true)
+            setOverlayVisible(false)
+            delay(500)
+
+            val session = ScreenGrab.Session.start(
+                this@FloatingService, screen(), code, data
+            )
+
+            setOverlayVisible(true)
+
+            if (session == null) {
+                promote(false)
+                toast("Gagal memulai Live Screen")
+                return@launch
+            }
+
+            liveSession?.close()
+            liveSession = session
+            liveActive = true
+            toast("Live Screen aktif")
+
+            liveJob = scope.launch {
+                while (liveActive && running) {
+                    var bitmap: Bitmap? = null
+
+                    try {
+                        bitmap = liveSession?.frame()
+
+                        if (bitmap != null && !busy) {
+                            val small = withContext(Dispatchers.Default) {
+                                ScreenGrab.scaled(bitmap!!, 1280)
+                            }
+                            val jpg = withContext(Dispatchers.Default) {
+                                ScreenGrab.jpeg(small)
+                            }
+                            small.recycle()
+
+                            send(
+                                "Analisis tampilan layar terbaru.",
+                                jpg,
+                                "◉ Live Screen"
+                            )
+                            job?.join()
+                        } else {
+                            bitmap?.recycle()
+                        }
+                    } catch (e: CancellationException) {
+                        bitmap?.takeIf { !it.isRecycled }?.recycle()
+                        break
+                    } catch (e: Exception) {
+                        bitmap?.takeIf { !it.isRecycled }?.recycle()
+                    }
+
+                    delay(5000)
+                }
+            }
+        } catch (e: Exception) {
+            setOverlayVisible(true)
+            stopLive()
+            toast("Live Screen gagal")
+        }
+    }
+}
+
 }
