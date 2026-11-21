@@ -40,12 +40,14 @@ object Prefs {
         } catch (e: Exception) { }
     }
 
-    fun apiKey(c: Context): String = try {
-        val p = sp(c).getString("k", null)?.split(":") ?: return ""
-        val ci = Cipher.getInstance("AES/GCM/NoPadding")
-        ci.init(Cipher.DECRYPT_MODE, secret(), GCMParameterSpec(128, Base64.decode(p[0], Base64.NO_WRAP)))
-        String(ci.doFinal(Base64.decode(p[1], Base64.NO_WRAP)), Charsets.UTF_8)
-    } catch (e: Exception) { "" }
+    fun apiKey(c: Context): String {
+        return try {
+            val p = sp(c).getString("k", null)?.split(":") ?: return ""
+            val ci = Cipher.getInstance("AES/GCM/NoPadding")
+            ci.init(Cipher.DECRYPT_MODE, secret(), GCMParameterSpec(128, Base64.decode(p[0], Base64.NO_WRAP)))
+            String(ci.doFinal(Base64.decode(p[1], Base64.NO_WRAP)), Charsets.UTF_8)
+        } catch (e: Exception) { "" }
+    }
 
     fun model(c: Context): String = sp(c).getString("model", "gemini-2.5-flash")!!.ifBlank { "gemini-2.5-flash" }
     fun setModel(c: Context, m: String) = sp(c).edit().putString("model", m.trim()).apply()
