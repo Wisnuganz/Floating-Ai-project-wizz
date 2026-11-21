@@ -1,4 +1,3 @@
-
 package com.floatingai.app
 
 import android.content.Context
@@ -7,7 +6,6 @@ import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.graphics.Point
 import android.hardware.display.DisplayManager
-import android.hardware.display.VirtualDisplay
 import android.media.Image
 import android.media.ImageReader
 import android.media.projection.MediaProjection
@@ -15,196 +13,105 @@ import android.media.projection.MediaProjectionManager
 import android.os.Handler
 import android.os.HandlerThread
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.ByteArrayOutputStream
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.max
 
 object ScreenGrab {
 
-    class Session private constructor(
-        private val projection: MediaProjection,
-        private val reader: ImageReader,
-        private val display: VirtualDisplay,
-        private val thread: HandlerThread,
-        private val handler: Handler
-    ) {
-        @Volatile private var stopped = false
-        private var waiting: CompletableDeferred<Bitmap?>? = null
-
-        init {
-            reader.setOnImageAvailableListener({ source ->
-                val image = try {
-                    source.acquireLatestImage()
-                } catch (_: Exception) {
-                    null
-                } ?: return@setOnImageAvailableListener
-
+    suspend fun grab(ctx: Context, p: Point, code: Int, data: Intent, ui: Handler): Bitmap? {
+        val mgr = ctx.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        val mp = mgr.getMediaProjection(code, data) ?: return null
+        mp.registerCallback(object : MediaProjection.Callback() {}, ui)
+        val dpi = ctx.resources.displayMetrics.densityDpi
+        val reader = ImageReader.newInstance(p.x, p.y, PixelFormat.RGBA_8888, 3)
+        val ht = HandlerThread("fai-cap").apply { start() }
+        val h = Handler(ht.looper)
+        val result = CompletableDeferred<Bitmap?>()
+        val fallback = AtomicReference<Bitmap?>(null)
+        reader.setOnImageAvailableListener({ r ->
+            val img = try { r.acquireLatestImage() } catch (e: Exception) { null }
+            if (img != null) {
                 try {
-                    val target = synchronized(this) { waiting }
-                    if (target != null && !target.isCompleted) {
-                        target.complete(toBitmap(image))
+                    if (!result.isCompleted) {
+                        val b = toBitmap(img)
+                        if (isBlank(b)) {
+                            fallback.getAndSet(b)?.recycle()
+                        } else {
+                            result.complete(b)
+                        }
                     }
-                } catch (_: Exception) {
+                } catch (e: Throwable) {
                 } finally {
-                    image.close()
-                }
-            }, handler)
-        }
-
-        suspend fun frame(): Bitmap? {
-            if (stopped) return null
-
-            val deferred = CompletableDeferred<Bitmap?>()
-            synchronized(this) {
-                if (stopped) return null
-                waiting?.cancel()
-                waiting = deferred
-            }
-
-            val result = withTimeoutOrNull(2500) {
-                deferred.await()
-            }
-
-            synchronized(this) {
-                if (waiting === deferred) waiting = null
-            }
-            return result
-        }
-
-        fun close() {
-            if (stopped) return
-            stopped = true
-
-            synchronized(this) {
-                waiting?.complete(null)
-                waiting = null
-            }
-
-            try { display.release() } catch (_: Exception) {}
-            try { reader.close() } catch (_: Exception) {}
-            try { projection.stop() } catch (_: Exception) {}
-            thread.quitSafely()
-        }
-
-        companion object {
-            fun start(
-                ctx: Context,
-                p: Point,
-                code: Int,
-                data: Intent
-            ): Session? {
-                val manager = ctx.getSystemService(
-                    Context.MEDIA_PROJECTION_SERVICE
-                ) as MediaProjectionManager
-
-                val projection = manager.getMediaProjection(code, data)
-                    ?: return null
-
-                val thread = HandlerThread("wizz-live-capture")
-                thread.start()
-                val handler = Handler(thread.looper)
-
-                try {
-                    val dpi = ctx.resources.displayMetrics.densityDpi
-                    val reader = ImageReader.newInstance(
-                        p.x, p.y, PixelFormat.RGBA_8888, 3
-                    )
-
-                    val session = arrayOfNulls<Session>(1)
-
-                    projection.registerCallback(
-                        object : MediaProjection.Callback() {
-                            override fun onStop() {
-                                session[0]?.close()
-                            }
-                        }, handler
-                    )
-
-                    val display = projection.createVirtualDisplay(
-                        "WizzLiveScreen",
-                        p.x,
-                        p.y,
-                        dpi,
-                        DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                        reader.surface,
-                        null,
-                        handler
-                    ) ?: run {
-                        reader.close()
-                        projection.stop()
-                        thread.quitSafely()
-                        return null
-                    }
-
-                    val result = Session(
-                        projection, reader, display, thread, handler
-                    )
-                    session[0] = result
-                    return result
-                } catch (e: Exception) {
-                    try { projection.stop() } catch (_: Exception) {}
-                    thread.quitSafely()
-                    return null
+                    img.close()
                 }
             }
+        }, h)
+        val vd = try {
+            mp.createVirtualDisplay("fai", p.x, p.y, dpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader.surface, null, h)
+        } catch (e: Exception) { null }
+        var bmp: Bitmap? = null
+        if (vd != null) {
+            bmp = withTimeoutOrNull(5000) {
+                var flip = false
+                while (!result.isCompleted) {
+                    delay(200)
+                    flip = !flip
+                    try { vd.resize(p.x, p.y, if (flip) dpi + 1 else dpi) } catch (_: Exception) { }
+                }
+                result.await()
+            }
         }
+        if (bmp == null) bmp = fallback.getAndSet(null) else fallback.getAndSet(null)?.recycle()
+        try { vd?.release() } catch (_: Exception) { }
+        try { reader.close() } catch (_: Exception) { }
+        try { mp.stop() } catch (_: Exception) { }
+        ht.quitSafely()
+        return bmp
     }
 
-    suspend fun grab(
-        ctx: Context,
-        p: Point,
-        code: Int,
-        data: Intent,
-        ui: Handler
-    ): Bitmap? {
-        val session = Session.start(ctx, p, code, data) ?: return null
-        return try {
-            session.frame()
-        } finally {
-            session.close()
+    private fun isBlank(b: Bitmap): Boolean {
+        val w = b.width
+        val h = b.height
+        var first = 0
+        var set = false
+        for (yi in 1..9) {
+            for (xi in 1..9) {
+                val px = b.getPixel(w * xi / 10, h * yi / 10)
+                if (!set) { first = px; set = true } else if (px != first) return false
+            }
         }
+        return true
     }
 
     private fun toBitmap(img: Image): Bitmap {
-        val plane = img.planes[0]
-        val pixelStride = plane.pixelStride
-        val rowStride = plane.rowStride
-        val padding = rowStride - pixelStride * img.width
-
-        val full = Bitmap.createBitmap(
-            img.width + padding / pixelStride,
-            img.height,
-            Bitmap.Config.ARGB_8888
-        )
-        full.copyPixelsFromBuffer(plane.buffer)
-
-        if (padding == 0) return full
-
-        val cropped = Bitmap.createBitmap(
-            full, 0, 0, img.width, img.height
-        )
+        val pl = img.planes[0]
+        val ps = pl.pixelStride
+        val rs = pl.rowStride
+        val pad = rs - ps * img.width
+        val full = Bitmap.createBitmap(img.width + pad / ps, img.height, Bitmap.Config.ARGB_8888)
+        full.copyPixelsFromBuffer(pl.buffer)
+        if (pad == 0) return full
+        val cut = Bitmap.createBitmap(full, 0, 0, img.width, img.height)
         full.recycle()
-        return cropped
+        return cut
     }
 
     fun scaled(b: Bitmap, maxSide: Int): Bitmap {
-        val longest = max(b.width, b.height)
-        if (longest <= maxSide) return b
-
-        val ratio = maxSide.toFloat() / longest
-        val result = Bitmap.createScaledBitmap(
-            b,
-            (b.width * ratio).toInt(),
-            (b.height * ratio).toInt(),
-            true
-        )
+        val m = max(b.width, b.height)
+        if (m <= maxSide) return b
+        val s = maxSide.toFloat() / m
+        val r = Bitmap.createScaledBitmap(b, (b.width * s).toInt(), (b.height * s).toInt(), true)
         b.recycle()
-        return result
+        return r
     }
 
     fun jpeg(b: Bitmap): ByteArray {
-        val output = ByteArrayOutputStream()
-        b.compress(Bitmap.CompressFormat.JPEG, 75, output)
-        return output.toByteArray()
+        val o = ByteArrayOutputStream()
+        b.compress(Bitmap.CompressFormat.JPEG, 80, o)
+        return o.toByteArray()
     }
 }
