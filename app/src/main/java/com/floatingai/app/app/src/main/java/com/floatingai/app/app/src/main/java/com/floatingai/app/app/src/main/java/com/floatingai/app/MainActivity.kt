@@ -50,4 +50,67 @@ class MainActivity : AppCompatActivity() {
         layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) }
     }
 
-    override fun onCreate(savedIn
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(32), dp(20), dp(32)) }
+        root.addView(tv("Wizz Ai", 30f, Color.WHITE, true))
+        root.addView(tv("Asisten belajar AI yang melayang di atas aplikasi lain. Layar hanya diambil saat kamu menekan tombol dan menyetujui dialog sistem.", 13f, 0xFF9AA0A6.toInt(), false))
+        status = tv("", 13f, Color.WHITE, false)
+        root.addView(status)
+
+        root.addView(tv("Gemini API key", 13f, blue, true))
+        keyIn = field("Tempel API key dari aistudio.google.com", true).also { it.setText(Prefs.apiKey(this)) }
+        root.addView(keyIn)
+        root.addView(tv("Model", 13f, blue, true))
+        modelIn = field("gemini-2.5-flash", false).also { it.setText(Prefs.model(this)) }
+        root.addView(modelIn)
+
+        root.addView(SwitchCompat(this).apply {
+            text = "Sembunyikan jawaban saat jendela diperkecil"; setTextColor(Color.WHITE); textSize = 13f
+            isChecked = Prefs.autoHide(this@MainActivity)
+            setPadding(0, dp(14), 0, dp(6))
+            setOnCheckedChangeListener { _, c -> Prefs.setAutoHide(this@MainActivity, c) }
+        })
+
+        root.addView(btn("1. Izinkan tampil di atas aplikasi lain", false) {
+            startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+        })
+        root.addView(btn("2. Izinkan notifikasi (Android 13+)", false) {
+            if (Build.VERSION.SDK_INT >= 33)
+                ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+            else toast("Tidak perlu di versi Android ini")
+        })
+        root.addView(btn("Simpan pengaturan", false) { save(); toast("Tersimpan") })
+        root.addView(btn("Mulai Wizz Ai", true) {
+            save()
+            when {
+                !Settings.canDrawOverlays(this) -> toast("Izinkan overlay dulu (langkah 1)")
+                Prefs.apiKey(this).isBlank() -> toast("Isi API key dulu")
+                else -> { FloatingService.start(this); moveTaskToBack(true) }
+            }
+        })
+        root.addView(btn("Hentikan Wizz Ai", false) {
+            startService(Intent(this, FloatingService::class.java).setAction(FloatingService.ACTION_STOP))
+        })
+        root.addView(btn("Hapus riwayat percakapan", false) {
+            Prefs.clearHistory(this); toast("Riwayat dihapus")
+        })
+        root.addView(tv("Privasi: API key terenkripsi di perangkat & tidak pernah ditulis ke log. Screenshot hanya di memori, tidak disimpan ke galeri, dan langsung dibuang setelah dianalisis. Notifikasi tetap tampil selama layanan berjalan.", 12f, 0xFF9AA0A6.toInt(), false).apply { setPadding(0, dp(16), 0, 0) })
+
+        setContentView(ScrollView(this).apply { setBackgroundColor(Color.BLACK); addView(root) })
+    }
+
+    override fun onResume() {
+        super.onResume()
+        val ov = Settings.canDrawOverlays(this)
+        status.text = (if (ov) "✓ Izin overlay aktif" else "✗ Izin overlay belum aktif") +
+            "\n" + (if (FloatingService.running) "● Wizz Ai sedang berjalan" else "○ Wizz Ai belum berjalan")
+    }
+
+    private fun save() {
+        Prefs.setApiKey(this, keyIn.text.toString())
+        Prefs.setModel(this, modelIn.text.toString())
+    }
+
+    private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
+}
